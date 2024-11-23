@@ -13,7 +13,7 @@ This is a WordPress plugin designed to integrate Keevault License Manager with W
 - **Product-Specific Settings**: Customize product settings like Keevault Product ID for each product and/or variation.
 - **Order Processing**: Automatically assign Keevault license keys for products purchased in WooCommerce.
 - **My Account Endpoint**: Adds a new 'License Keys' section in the WooCommerce "My Account" page where customers can view their license keys.
-- **Database Integration**: Contracts are stored in a custom database table and linked to WooCommerce orders.
+- **Database Integration**: License keys are stored in a custom database table and linked to WooCommerce orders.
 
 ## Installation
 
@@ -34,7 +34,7 @@ This is a WordPress plugin designed to integrate Keevault License Manager with W
 3. **Variation Settings**:
     - Product variations also support Keevault settings. Configure these in the product variations section.
 
-4. **My Account Endpoint**: A new endpoint 'License Keys' will appear in the WooCommerce **My Account** page for customers to view their contract details.
+4. **My Account Endpoint**: A new endpoint 'License Keys' will appear in the WooCommerce **My Account** page for customers to view their license keys details.
 
 ## Usage
 
