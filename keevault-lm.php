@@ -21,8 +21,6 @@ class Keevault_LM {
 			$data = json_decode( file_get_contents( 'php://input' ), true );
 
 			if ( isset( $data['original']['response']['identifier'] ) && $data['original']['response']['code'] == 803 ) {
-				error_log( print_r( $data['original']['response']['identifier'], true ) );
-
 				foreach ( $data['original']['response']['license_keys'] as $license_key ) {
 					global $wpdb;
 
