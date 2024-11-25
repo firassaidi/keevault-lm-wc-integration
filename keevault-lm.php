@@ -17,6 +17,28 @@ class Keevault_LM {
 	private array $setting_tabs = [];
 
 	public function __construct() {
+		if ( isset( $_GET['keevault-webhook'] ) && $_GET['keevault-webhook'] == get_option( 'keevault_lm_webhook_key', 'not-set' ) && $_GET['keevault-webhook'] != 'not-set' ) {
+			$data = json_decode( file_get_contents( 'php://input' ), true );
+
+			if ( isset( $data['original']['response']['identifier'] ) && $data['original']['response']['code'] == 803 ) {
+				error_log( print_r( $data['original']['response']['identifier'], true ) );
+
+				foreach ( $data['original']['response']['license_keys'] as $license_key ) {
+					global $wpdb;
+
+					$license_key['order_id'] = $data['original']['response']['identifier'];
+					$license_key['item_id']  = 0;
+					$license_key['user_id']  = get_current_user_id();
+					unset( $license_key['meta_data'] );
+					unset( $license_key['id'] );
+
+					$wpdb->insert( $wpdb->prefix . 'keevault_license_keys', $license_key );
+				}
+			}
+
+			die();
+		}
+
 		// Order Hook for contract creation
 		add_action( 'woocommerce_thankyou', [ $this, 'assign_license_keys_on_order' ] );
 
@@ -204,6 +226,7 @@ class Keevault_LM {
 			'license_key_status'    => esc_html__( 'Status', 'keevault' ),
 			'unlimited'             => esc_html__( 'Unlimited', 'keevault' ),
 			'failed_to_load'        => esc_html__( 'Failed to load license key details. Please try again later.', 'keevault' ),
+			'wait'                  => esc_html__( 'Please wait on this page while we get your license keys', 'keevault' ),
 		) );
 
 		// Add a container where contract details will be displayed
@@ -244,19 +267,19 @@ class Keevault_LM {
 		}
 
 		// Query the table for license key data related to the order
-		$table_name = $wpdb->prefix . 'keevault_license_keys';
-		$contracts  = $wpdb->get_results( $wpdb->prepare(
+		$table_name   = $wpdb->prefix . 'keevault_license_keys';
+		$license_keys = $wpdb->get_results( $wpdb->prepare(
 			"SELECT * FROM $table_name WHERE order_id = %d ORDER BY id DESC",
 			$order_id
 		) );
 
 		// Check if license keys were found
-		if ( ! $contracts ) {
-			wp_send_json_error( esc_html__( 'No license keys found for this order.', 'keevault' ) );
+		if ( ! $license_keys ) {
+			wp_send_json_error( esc_html__( 'Please wait on this page while we get your license keys.', 'keevault' ) );
 		}
 
 		// Return license keys data as JSON
-		wp_send_json_success( $contracts );
+		wp_send_json_success( $license_keys );
 	}
 
 	public function assign_license_keys_on_order( $order_id ): void {
@@ -291,7 +314,7 @@ class Keevault_LM {
 			$owner_name = $order->get_billing_first_name() . ' ' . $order->get_billing_last_name();
 		}
 
-		$endpoint = '/api/v1/random-assign-license-keys';
+		$endpoint = '/api/v1/random-assign-license-keys-queued';
 		$body     = [
 			'api_key'     => $api_key,
 			'product_id'  => $product_id,
@@ -299,6 +322,8 @@ class Keevault_LM {
 			'owner_email' => $order->get_billing_email(),
 			'quantity'    => $quantity,
 			'generate'    => 1,
+			'identifier'  => $order->get_id(),
+			'webhook_url' => site_url() . '?keevault-webhook=' . get_option( 'keevault_lm_webhook_key', 'not-set' )
 		];
 
 		$retry_limit = 0;
@@ -307,7 +332,7 @@ class Keevault_LM {
 			$response      = wp_remote_post( $api_url . $endpoint, [
 				'method'    => 'POST',
 				'body'      => $body,
-				//'sslverify' => false,
+				'sslverify' => false,
 			] );
 			$response_body = null;
 
@@ -316,21 +341,22 @@ class Keevault_LM {
 			}
 
 			$retry_limit ++;
-		} while ( ( is_wp_error( $response ) || isset( $response_body['response']['errors']['contract_key'] ) ) && $retry_limit < 15 );
+		} while ( is_wp_error( $response ) && $retry_limit < 15 );
 
-		if ( ! is_wp_error( $response ) && isset( $response_body['response']['code'] ) && $response_body['response']['code'] == 803 ) {
-			foreach ( $response_body['response']['license_keys'] as $license_key ) {
-				global $wpdb;
+		if ( $this->already_queued( $order->get_id(), $item_id ) == 0 && ! is_wp_error( $response ) && isset( $response_body['response']['code'] ) && $response_body['response']['code'] == 807 ) {
+			global $wpdb;
 
-				$license_key['order_id'] = $order->get_id();
-				$license_key['item_id']  = $item_id;
-				$license_key['user_id']  = get_current_user_id();
-				unset( $license_key['meta_data'] );
-				unset( $license_key['id'] );
-
-				$wpdb->insert( $wpdb->prefix . 'keevault_license_keys', $license_key );
-			}
+			$wpdb->insert( $wpdb->prefix . 'keevault_orders_queues', [
+				'order_id' => $order->get_id(),
+				'item_id'  => $item_id
+			] );
 		}
+	}
+
+	private function already_queued( $order_id, $item_id ): int {
+		global $wpdb;
+
+		return (int) $wpdb->get_var( "SELECT COUNT(*) FROM " . $wpdb->prefix . "keevault_orders_queues WHERE order_id = $order_id AND item_id = $item_id" );
 	}
 
 	private function license_keys_assigned( $order_id, $item_id ): int {
@@ -410,7 +436,7 @@ class Keevault_LM {
 			50
 		);
 
-		remove_submenu_page('keevault', 'keevault');
+		remove_submenu_page( 'keevault', 'keevault' );
 	}
 
 	public function keevault_page(): void {
@@ -423,6 +449,7 @@ class Keevault_LM {
 			<h1><?php echo esc_html( get_admin_page_title() ); ?></h1>
 			<h2 class="nav-tab-wrapper">
 				<a href="?page=keevault-settings&tab=api" class="nav-tab <?php echo ( ( isset( $_GET['tab'] ) && $_GET['tab'] == 'api' ) || ! isset( $_GET['tab'] ) ) ? 'nav-tab-active' : '' ?>"><?php esc_html_e( 'API', 'keevault' ); ?></a>
+				<a href="?page=keevault-settings&tab=webhooks" class="nav-tab <?php echo ( ( isset( $_GET['tab'] ) && $_GET['tab'] == 'webhooks' ) ) ? 'nav-tab-active' : '' ?>"><?php esc_html_e( 'Webhooks', 'keevault' ); ?></a>
 				<?php if ( $this->setting_tabs ) {
 					foreach ( $this->setting_tabs as $setting_tab ) { ?>
 						<a href="?page=keevault-settings&tab=<?php echo esc_html( $setting_tab['name'] ) ?>" class="nav-tab <?php echo isset( $_GET['tab'] ) && $_GET['tab'] == $setting_tab['slug'] ? 'nav-tab-active' : ''; ?>"><?php echo esc_html( $setting_tab['name'] ) ?></a>
@@ -435,6 +462,9 @@ class Keevault_LM {
 				if ( $active_tab == 'api' ) {
 					settings_fields( 'keevault_lm_api_settings' );
 					do_settings_sections( 'keevault_lm_api_settings' );
+				} elseif ( $active_tab == 'webhooks' ) {
+					settings_fields( 'keevault_lm_webhooks_settings' );
+					do_settings_sections( 'keevault_lm_webhooks_settings' );
 				}
 				submit_button();
 				?>
@@ -444,6 +474,7 @@ class Keevault_LM {
 	}
 
 	public function settings_init(): void {
+		// API
 		register_setting( 'keevault_lm_api_settings', 'keevault_lm_api_key' );
 		register_setting( 'keevault_lm_api_settings', 'keevault_lm_api_url' );
 
@@ -470,6 +501,22 @@ class Keevault_LM {
 			'keevault_lm_api_settings',
 			'keevault_lm_api_section'
 		);
+
+		// Webhooks
+		register_setting( 'keevault_lm_webhooks_settings', 'keevault_lm_webhook_key' );
+
+		add_settings_section( 'keevault_lm_webhooks_section', esc_html__( 'Webhooks Configuration', 'keevault' ), null, 'keevault_lm_webhooks_settings' );
+
+		add_settings_field(
+			'keevault_lm_webhook_key',
+			esc_html__( 'Webhook Key', 'keevault' ),
+			function () {
+				$keevault_lm_webhook_key = get_option( 'keevault_lm_webhook_key', 'not-set' );
+				echo "<input type='text' class='regular-text' name='keevault_lm_webhook_key' value='{$keevault_lm_webhook_key}' />";
+			},
+			'keevault_lm_webhooks_settings',
+			'keevault_lm_webhooks_section'
+		);
 	}
 
 	public function is_top_level_menu_slug_exists( $slug ): bool {
@@ -491,6 +538,8 @@ class Keevault_LM {
 		flush_rewrite_rules(); // Flush rewrite rules
 
 		global $wpdb;
+
+		require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
 
 		$table_name      = $wpdb->prefix . 'keevault_license_keys';
 		$charset_collate = $wpdb->get_charset_collate();
@@ -515,7 +564,19 @@ class Keevault_LM {
 		            PRIMARY KEY (id)
         	) $charset_collate;";
 
-		require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+		dbDelta( $sql );
+
+		$table_name      = $wpdb->prefix . 'keevault_orders_queues';
+		$charset_collate = $wpdb->get_charset_collate();
+
+		$sql = "CREATE TABLE IF NOT EXISTS $table_name (
+		            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		            order_id INT UNSIGNED NOT NULL,
+		            item_id INT UNSIGNED NOT NULL,
+		            status varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
+		            PRIMARY KEY (id)
+        	) $charset_collate;";
+
 		dbDelta( $sql );
 	}
 }
