@@ -2,7 +2,7 @@
 /*
 Plugin Name: Keevault License Manager - WooCommerce Integration
 Description: Sell Keevault license keys through WooCommerce.
-Version: 1.0.0
+Version: 1.0.1
 Author: Firas Saidi
 */
 
@@ -17,15 +17,7 @@ class Keevault_LM {
 	private array $setting_tabs = [];
 
 	public function __construct() {
-		if ( isset( $_GET['keevault-webhook'] ) && $_GET['keevault-webhook'] == get_option( 'keevault_lm_webhook_key', 'not-set' ) && $_GET['keevault-webhook'] != 'not-set' ) {
-			$data = json_decode( file_get_contents( 'php://input' ), true );
-
-			if ( isset( $data['original']['response']['identifier'] ) && $data['original']['response']['code'] == 803 ) {
-				$this->process_license_keys( $data['original']['response']['identifier'], $data['original']['response']['license_keys'] );
-			}
-
-			die();
-		}
+		add_action( 'init', [ $this, 'webhooks_handler' ] );
 
 		// Order Hook for contract creation
 		add_action( 'woocommerce_thankyou', [ $this, 'assign_license_keys_on_order' ] );
@@ -53,6 +45,20 @@ class Keevault_LM {
 			// Add settings for product variations
 			add_action( 'woocommerce_product_after_variable_attributes', [ $this, 'add_keevault_variation_settings' ], 10, 3 );
 			add_action( 'woocommerce_save_product_variation', [ $this, 'save_keevault_variation_settings' ], 10, 2 );
+		}
+	}
+
+	public function webhooks_handler(): void {
+		if ( isset( $_GET['keevault-webhook'] ) && $_GET['keevault-webhook'] == get_option( 'keevault_lm_webhook_key', 'not-set' ) && $_GET['keevault-webhook'] != 'not-set' ) {
+			$data = json_decode( file_get_contents( 'php://input' ), true );
+
+			error_log( print_r( $data, true ) );
+
+			if ( isset( $data['original']['response']['identifier'] ) && $data['original']['response']['code'] == 803 ) {
+				$this->process_license_keys( $data['original']['response']['identifier'], $data['original']['response']['license_keys'] );
+			}
+
+			die();
 		}
 	}
 
@@ -311,59 +317,80 @@ class Keevault_LM {
 	}
 
 	private function assign_license_keys( $api_key, $api_url, $product_id, $order, $item_id, $quantity ): void {
-		$endpoint_option = get_option( 'keevault_lm_api_assign_license_keys_endpoint', 2 );
-		$api_endpoint    = 'random-assign-license-keys-queued';
-		if ( $endpoint_option == 1 ) {
-			$api_endpoint = 'random-assign-license-keys';
-		}
+		$already_queued = $this->already_queued( $order->get_id(), $item_id );
 
-		$owner_name = $order->get_billing_company();
-
-		if ( empty( $owner_name ) ) {
-			$owner_name = $order->get_billing_first_name() . ' ' . $order->get_billing_last_name();
-		}
-
-		$endpoint = '/api/v1/' . $api_endpoint;
-		$body     = [
-			'api_key'     => $api_key,
-			'product_id'  => $product_id,
-			'owner_name'  => $owner_name,
-			'owner_email' => $order->get_billing_email(),
-			'quantity'    => $quantity,
-			'generate'    => 1,
-			'identifier'  => $order->get_id(),
-			'webhook_url' => site_url() . '?keevault-webhook=' . get_option( 'keevault_lm_webhook_key', 'not-set' )
-		];
-
-		$retry_limit = 0;
-
-		do {
-			$response      = wp_remote_post( $api_url . $endpoint, [
-				'method'    => 'POST',
-				'body'      => $body,
-				'sslverify' => false,
-			] );
-			$response_body = null;
-
-			if ( ! is_wp_error( $response ) ) {
-				$response_body = json_decode( wp_remote_retrieve_body( $response ), true );
+		if ( $already_queued == 0 ) {
+			$endpoint_option = get_option( 'keevault_lm_api_assign_license_keys_endpoint', 2 );
+			$api_endpoint    = 'random-assign-license-keys-queued';
+			if ( $endpoint_option == 1 ) {
+				$api_endpoint = 'random-assign-license-keys';
 			}
 
-			$retry_limit ++;
-		} while ( is_wp_error( $response ) && $retry_limit < 15 );
+			$owner_name = $order->get_billing_company();
 
-		if ( $endpoint_option == 2 ) {
-			if ( $this->already_queued( $order->get_id(), $item_id ) == 0 && ! is_wp_error( $response ) && isset( $response_body['response']['code'] ) && $response_body['response']['code'] == 807 ) {
-				global $wpdb;
+			if ( empty( trim( $owner_name ) ) ) {
+				$owner_name = $order->get_billing_first_name() . ' ' . $order->get_billing_last_name();
+			}
 
-				$wpdb->insert( $wpdb->prefix . 'keevault_orders_queues', [
-					'order_id' => $order->get_id(),
-					'item_id'  => $item_id
+			if ( empty( trim( $owner_name ) ) ) {
+				$owner_name = esc_html__( 'Not set', 'keevault' );
+			}
+
+			$owner_email = $order->get_billing_email();;
+
+			if ( empty( trim( $owner_email ) ) ) {
+				$owner_email = esc_html__( 'Not set', 'keevault' );
+			}
+
+			$endpoint = '/api/v1/' . $api_endpoint;
+			$body     = [
+				'api_key'     => $api_key,
+				'product_id'  => $product_id,
+				'owner_name'  => $owner_name,
+				'owner_email' => $owner_email,
+				'quantity'    => $quantity,
+				'generate'    => 1,
+				'identifier'  => $order->get_id(),
+				'webhook_url' => site_url() . '?keevault-webhook=' . get_option( 'keevault_lm_webhook_key', 'not-set' )
+			];
+
+			$retry_limit = 0;
+
+			do {
+				$response      = wp_remote_post( $api_url . $endpoint, [
+					'method'    => 'POST',
+					'body'      => $body,
+					'sslverify' => false,
 				] );
-			}
-		} elseif ( $endpoint_option == 1 ) {
-			if ( $response_body['response']['code'] == 803 ) {
-				$this->process_license_keys( $order->get_id(), $response_body['response']['license_keys'] );
+				$response_body = null;
+
+				if ( ! is_wp_error( $response ) ) {
+					$response_body = json_decode( wp_remote_retrieve_body( $response ), true );
+				}
+
+				$retry_limit ++;
+			} while ( is_wp_error( $response ) && $retry_limit < 15 );
+
+			if ( $endpoint_option == 2 ) {
+				if ( ! is_wp_error( $response ) && isset( $response_body['response']['code'] ) && $response_body['response']['code'] == 807 ) {
+					global $wpdb;
+
+					$wpdb->insert( $wpdb->prefix . 'keevault_orders_queues', [
+						'order_id' => $order->get_id(),
+						'item_id'  => $item_id
+					] );
+				}
+			} elseif ( $endpoint_option == 1 ) {
+				if ( $response_body['response']['code'] == 803 ) {
+					global $wpdb;
+
+					$wpdb->insert( $wpdb->prefix . 'keevault_orders_queues', [
+						'order_id' => $order->get_id(),
+						'item_id'  => $item_id
+					] );
+
+					$this->process_license_keys( $order->get_id(), $response_body['response']['license_keys'] );
+				}
 			}
 		}
 	}
@@ -617,6 +644,13 @@ class Keevault_LM {
         	) $charset_collate;";
 
 		dbDelta( $sql );
+	}
+
+	public function log( $text ): void {
+		$this_directory = dirname( __FILE__ );
+		$fp             = fopen( $this_directory . "/logs.txt", "w" );
+		fwrite( $fp, $text );
+		fclose( $fp );
 	}
 }
 
