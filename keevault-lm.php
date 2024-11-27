@@ -52,8 +52,6 @@ class Keevault_LM {
 		if ( isset( $_GET['keevault-webhook'] ) && $_GET['keevault-webhook'] == get_option( 'keevault_lm_webhook_key', 'not-set' ) && $_GET['keevault-webhook'] != 'not-set' ) {
 			$data = json_decode( file_get_contents( 'php://input' ), true );
 
-			error_log( 'webhook: ' . print_r( $data, true ) );
-
 			if ( isset( $data['original']['response']['identifier'] ) && $data['original']['response']['code'] == 803 ) {
 				$this->process_license_keys( $data['original']['response']['identifier'], $data['original']['response']['license_keys'] );
 			}
