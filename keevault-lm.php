@@ -21,17 +21,7 @@ class Keevault_LM {
 			$data = json_decode( file_get_contents( 'php://input' ), true );
 
 			if ( isset( $data['original']['response']['identifier'] ) && $data['original']['response']['code'] == 803 ) {
-				foreach ( $data['original']['response']['license_keys'] as $license_key ) {
-					global $wpdb;
-
-					$license_key['order_id'] = $data['original']['response']['identifier'];
-					$license_key['item_id']  = 0;
-					$license_key['user_id']  = get_current_user_id();
-					unset( $license_key['meta_data'] );
-					unset( $license_key['id'] );
-
-					$wpdb->insert( $wpdb->prefix . 'keevault_license_keys', $license_key );
-				}
+				$this->process_license_keys( $data['original']['response']['identifier'], $data['original']['response']['license_keys'] );
 			}
 
 			die();
@@ -63,6 +53,21 @@ class Keevault_LM {
 			// Add settings for product variations
 			add_action( 'woocommerce_product_after_variable_attributes', [ $this, 'add_keevault_variation_settings' ], 10, 3 );
 			add_action( 'woocommerce_save_product_variation', [ $this, 'save_keevault_variation_settings' ], 10, 2 );
+		}
+	}
+
+	public function process_license_keys( $oder_id, $license_keys ): void {
+		$order = wc_get_order( $oder_id );
+		foreach ( $license_keys as $license_key ) {
+			global $wpdb;
+
+			$license_key['order_id'] = $oder_id;
+			$license_key['item_id']  = 0;
+			$license_key['user_id']  = $order->get_user_id();
+			unset( $license_key['meta_data'] );
+			unset( $license_key['id'] );
+
+			$wpdb->insert( $wpdb->prefix . 'keevault_license_keys', $license_key );
 		}
 	}
 
@@ -306,13 +311,19 @@ class Keevault_LM {
 	}
 
 	private function assign_license_keys( $api_key, $api_url, $product_id, $order, $item_id, $quantity ): void {
+		$endpoint_option = get_option( 'keevault_lm_api_assign_license_keys_endpoint', 2 );
+		$api_endpoint    = 'random-assign-license-keys-queued';
+		if ( $endpoint_option == 1 ) {
+			$api_endpoint = 'random-assign-license-keys';
+		}
+
 		$owner_name = $order->get_billing_company();
 
 		if ( empty( $owner_name ) ) {
 			$owner_name = $order->get_billing_first_name() . ' ' . $order->get_billing_last_name();
 		}
 
-		$endpoint = '/api/v1/random-assign-license-keys-queued';
+		$endpoint = '/api/v1/' . $api_endpoint;
 		$body     = [
 			'api_key'     => $api_key,
 			'product_id'  => $product_id,
@@ -341,13 +352,19 @@ class Keevault_LM {
 			$retry_limit ++;
 		} while ( is_wp_error( $response ) && $retry_limit < 15 );
 
-		if ( $this->already_queued( $order->get_id(), $item_id ) == 0 && ! is_wp_error( $response ) && isset( $response_body['response']['code'] ) && $response_body['response']['code'] == 807 ) {
-			global $wpdb;
+		if ( $endpoint_option == 2 ) {
+			if ( $this->already_queued( $order->get_id(), $item_id ) == 0 && ! is_wp_error( $response ) && isset( $response_body['response']['code'] ) && $response_body['response']['code'] == 807 ) {
+				global $wpdb;
 
-			$wpdb->insert( $wpdb->prefix . 'keevault_orders_queues', [
-				'order_id' => $order->get_id(),
-				'item_id'  => $item_id
-			] );
+				$wpdb->insert( $wpdb->prefix . 'keevault_orders_queues', [
+					'order_id' => $order->get_id(),
+					'item_id'  => $item_id
+				] );
+			}
+		} elseif ( $endpoint_option == 1 ) {
+			if ( $response_body['response']['code'] == 803 ) {
+				$this->process_license_keys( $order->get_id(), $response_body['response']['license_keys'] );
+			}
 		}
 	}
 
@@ -475,6 +492,7 @@ class Keevault_LM {
 		// API
 		register_setting( 'keevault_lm_api_settings', 'keevault_lm_api_key' );
 		register_setting( 'keevault_lm_api_settings', 'keevault_lm_api_url' );
+		register_setting( 'keevault_lm_api_settings', 'keevault_lm_api_assign_license_keys_endpoint' );
 
 		add_settings_section( 'keevault_lm_api_section', esc_html__( 'Keevault API Configuration', 'keevault' ), null, 'keevault_lm_api_settings' );
 
@@ -500,6 +518,14 @@ class Keevault_LM {
 			'keevault_lm_api_section'
 		);
 
+		add_settings_field(
+			'keevault_lm_api_assign_license_keys_endpoint',
+			esc_html__( 'Select License Keys Endpoint', 'keevault' ),
+			[ $this, 'api_assign_license_keys_endpoint_render_select_field' ],
+			'keevault_lm_api_settings',
+			'keevault_lm_api_section'
+		);
+
 		// Webhooks
 		register_setting( 'keevault_lm_webhooks_settings', 'keevault_lm_webhook_key' );
 
@@ -515,6 +541,21 @@ class Keevault_LM {
 			'keevault_lm_webhooks_settings',
 			'keevault_lm_webhooks_section'
 		);
+	}
+
+	public function api_assign_license_keys_endpoint_render_select_field(): void {
+		$selected = get_option( 'keevault_lm_api_assign_license_keys_endpoint', 2 );
+		$choices  = [
+			'1' => esc_html__( 'random-assign-license-keys', 'keevault' ),
+			'2' => esc_html__( 'random-assign-license-keys-queued', 'keevault' )
+		];
+
+		echo '<select name="keevault_lm_api_assign_license_keys_endpoint">';
+		foreach ( $choices as $key => $label ) {
+			$is_selected = $key == $selected ? 'selected' : '';
+			echo '<option value="' . esc_attr( $key ) . '" ' . $is_selected . '>' . esc_html( $label ) . '</option>';
+		}
+		echo '</select>';
 	}
 
 	public function is_top_level_menu_slug_exists( $slug ): bool {
